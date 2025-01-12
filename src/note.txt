@@ -1,0 +1,858 @@
+ADC
+
+#include <Adafruit_ADS7830.h>
+
+Adafruit_ADS7830 ads7830;
+
+void setupADS7830() {
+  if (!ads7830.begin(0x4B)) {
+    Serial.println("Failed to initialize ADS7830!");
+    while (1);
+  }
+  Serial.println("ADS7830 initialized successfully!");
+}
+
+float readADS7830Channel(uint8_t channel) {
+  float voltageSum = 0;
+  for (int i = 0; i < 10; i++) {
+    uint8_t rawValue = ads7830.readADCsingle(channel);
+    float voltage = 2* rawValue * (2.5 / 255.0);  // Assuming 2.5V reference, but x2 for resistor divider
+    voltageSum += voltage;
+    delay(1);
+  }
+  return voltageSum / 10;
+}
+
+void readAllChannels(float *voltages) {
+  for (uint8_t i = 0; i < 8; i++) {
+    voltages[i] = readADS7830Channel(i);
+    Serial.print("A");
+    Serial.print(i);
+    Serial.print(": ");
+    Serial.print(voltages[i], 3);
+    Serial.print("V\t");
+  }
+  Serial.println();
+}
+
+int calculateBatteryPercentage(float vbat) {
+  float percentage = (vbat - 3.0) / (4.25 - 3.0) * 100;
+  return constrain(percentage, 0, 100);
+}
+
+void displayBatteryIcon(int percentage) {
+  lcd.write((byte)4);  // Display the battery symbol
+  lcd.print(percentage);
+  lcd.print("%");
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+WIFI
+
+#include <Adafruit_SHT4x.h>
+#include <WiFi.h>
+#include "ThingSpeak.h"
+#include <ESP32Ping.h>
+int pingResult = 0;
+#include <string>
+
+unsigned long lastScrollTime = 0;
+int scrollPosition = 0;
+const char* currentScrollText = nullptr;
+int currentScrollRow = 0;
+
+Adafruit_SHT4x sht4 = Adafruit_SHT4x();
+
+// WiFi credentials
+const char* ssid = "832";
+const char* password = "83221266";
+
+// ThingSpeak channel details
+unsigned long myChannelNumber = 2804994;
+const char* myWriteAPIKey = "AMHQECWI699QY540";
+const char* myReadAPIKey = "WVAPPCI565U7SBGW";
+
+unsigned long myChannelNumber2 = 2805533;  //matildas
+const char* myWriteAPIKey2 = "L9MT2L33AUR5FYH6";
+const char* myReadAPIKey2 = "FGSY5318I773XD5K";
+
+
+WiFiClient client;
+
+void updatePing() {
+  IPAddress ip(8, 8, 8, 8);  // Google's DNS server
+  if (Ping.ping(ip, 1)) {
+    pingResult = Ping.averageTime();
+  } else {
+    pingResult = -1;  // Ping failed
+  }
+}
+
+void setupSHT4x() {
+  if (!sht4.begin()) {
+    Serial.println("Couldn't find SHT4x");
+    while (1) delay(1);
+  }
+  Serial.println("SHT4x sensor found");
+  sht4.setPrecision(SHT4X_HIGH_PRECISION);
+  sht4.setHeater(SHT4X_NO_HEATER);
+}
+
+void setupWiFi() {
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting to WiFi...");
+  }
+  Serial.println("Connected to WiFi");
+}
+
+void setupThingSpeak() {
+  ThingSpeak.begin(client);
+}
+
+void readSHT4x(float& temperature, float& humidity) {
+  sensors_event_t humidity_event, temp_event;
+  sht4.getEvent(&humidity_event, &temp_event);
+  temperature = temp_event.temperature;
+  humidity = humidity_event.relative_humidity;
+}
+
+int8_t manageHeater(float humidity, float temperature) {
+  static unsigned long lastHeaterActivation = 0;
+  static unsigned long lastMiniHeat = 0;
+  const unsigned long heaterInterval = 60000;       // 1 minute interval
+  const unsigned long miniHeatInterval = 900000;    // 15 minutes
+  const unsigned long heatDisplayDuration = 10000;  // 10 seconds
+  static unsigned long heatDisplayStart = 0;
+  static int8_t heatLevel = 0;  // 0: no heat, 1: low, 2: medium, 3: high
+
+  unsigned long currentTime = millis();
+
+  // Check for mini heat every 15 minutes
+  if (currentTime - lastMiniHeat >= miniHeatInterval) {
+    sht4.setHeater(SHT4X_LOW_HEATER_100MS);
+    lastMiniHeat = currentTime;
+    heatLevel = 1;
+    heatDisplayStart = currentTime;
+  }
+  // Check for conditions that require heating
+  else if (humidity > 90.0 && temperature < 65.0 && currentTime - lastHeaterActivation >= heaterInterval) {
+    sht4.setHeater(SHT4X_HIGH_HEATER_1S);
+    lastHeaterActivation = currentTime;
+    heatLevel = 3;
+    heatDisplayStart = currentTime;
+  } else if (humidity > 50.0 && temperature < 60.0 && currentTime - lastHeaterActivation >= heaterInterval) {
+    sht4.setHeater(SHT4X_LOW_HEATER_100MS);
+    lastHeaterActivation = currentTime;
+    heatLevel = 1;
+    heatDisplayStart = currentTime;
+  }
+
+  // Display heat level on LCD
+  // Return heat level instead of writing to LCD
+  if (currentTime - heatDisplayStart < heatDisplayDuration) {
+    return heatLevel;
+  }
+  return 0;
+
+  // Turn off heater after activation
+  if (currentTime - lastHeaterActivation >= 1000 || currentTime - lastMiniHeat >= 100) {
+    sht4.setHeater(SHT4X_NO_HEATER);
+  }
+}
+
+void displayWiFiIcon() {
+  if (WiFi.status() == WL_CONNECTED) {
+    // WiFi is connected, update LCD to show WiFi icon
+    lcd.setCursor(13, 0);
+    if (pingResult >= 0 && pingResult <= 699) {
+      lcd.print(pingResult);
+      lcd.write((byte)5);  //wifi
+    } else {
+      lcd.print(">!");
+      lcd.write((byte)5);
+    }
+  } else {
+    // WiFi is not connected, clear WiFi icon
+    lcd.setCursor(15, 0);
+    lcd.write((byte)5);
+    lcd.setCursor(15, 0);
+    lcd.print("!");
+  }
+}
+
+void sendToThingSpeak(double thermoTemp, float shtTemp, float shtHumidity, float vbat, float vusb, float v3_3, float v5) {
+  // Display ThingSpeak symbol
+  lcd.setCursor(15, 1);
+  lcd.write((byte)3);
+
+  ThingSpeak.setField(1, static_cast<float>(thermoTemp));
+  ThingSpeak.setField(2, shtTemp);
+  ThingSpeak.setField(3, shtHumidity);
+  ThingSpeak.setField(4, vbat);
+  ThingSpeak.setField(5, vusb);
+  ThingSpeak.setField(6, v3_3);
+  ThingSpeak.setField(7, v5);
+  ThingSpeak.setField(8, pingResult);
+
+  int x = ThingSpeak.writeFields(myChannelNumber, myWriteAPIKey);
+  if (x == 200) {
+    Serial.println("Channel update successful.");
+  } else {
+    Serial.println("Problem updating channel. HTTP error code " + String(x));
+    lcd.setCursor(15, 1);
+    lcd.print("!");
+  }
+
+  x = ThingSpeak.writeFields(myChannelNumber2, myWriteAPIKey2);
+  if (x == 200) {
+    Serial.println("Channel2 update successful.");
+  } else {
+    Serial.println("Problem updating channel2. HTTP error code " + String(x));
+    lcd.setCursor(15, 1);
+    lcd.print("X");
+  }
+
+  delay(1000);
+  lcd.setCursor(15, 1);
+  lcd.print(" ");
+}
+
+////////////////////////////help//////////////////////////////////////////
+
+void cycleDisplayInfo() {
+  static int infoState = 0; // Tracks which info screen to display
+  lcd.clear();
+
+  switch (infoState) {
+    case 0:
+      displayWiFiInfo();
+      break;
+    case 1:
+      displayADCValues();
+      break;
+    case 2:
+      displayChannelInfo();
+      break;
+    case 3:
+      displayAPIKey();
+      break;
+    case 4:
+      displayAPIKey2();
+      break;
+    case 5:
+      displayHelp();
+      break;
+    case 6:
+      displayURL();
+      break;
+    case 7:
+      displayLoginUsr();
+      break;
+    case 8:
+      displayLoginPwd();
+      break;
+    default:
+      exitHelpMode(); // Exit help mode after cycling through all screens
+      return;
+  }
+
+  infoState = (infoState + 1) % 9; // Cycle through screens (adjust number as needed)
+}
+
+void exitHelpMode() {
+  inHelpMode = false;
+}
+
+
+
+void displayWiFiInfo() {
+  lcd.setCursor(0, 0);
+  lcd.write((byte)5);
+  lcd.print("SSID: ");
+  lcd.print(WiFi.SSID());
+  lcd.setCursor(0, 1);
+  lcd.print(WiFi.localIP());
+}
+
+void displayADCValues() {
+  lcd.setCursor(0, 0);
+  lcd.print("ADC: ");
+  lcd.print(voltages[0], 2);
+  lcd.print("V ");
+  lcd.print(voltages[1], 2);
+  lcd.print("V");
+  lcd.setCursor(0, 1);
+  lcd.print("RSSI: ");
+  lcd.print(WiFi.RSSI());
+  lcd.print("dBm");
+}
+
+void displayChannelInfo() {
+  lcd.setCursor(0, 0);
+  lcd.print("Wifi-Ch: ");
+  lcd.print(WiFi.channel());
+  lcd.setCursor(0, 1);
+  lcd.print("Thgspk: ");
+  lcd.print(myChannelNumber2);
+  // Add more channel-related info if needed
+}
+
+void displayAPIKey() {
+  lcd.setCursor(0, 0);
+  lcd.print("Write API Key:");
+  lcd.setCursor(0, 1);
+  lcd.print(myWriteAPIKey2);  // Display full API key
+}
+
+void displayAPIKey2() {
+  lcd.setCursor(0, 0);
+  lcd.print("Read API Key:");
+  lcd.setCursor(0, 1);
+  lcd.print(myReadAPIKey2);  // Display full API key
+}
+
+void displayHelp2() {
+  lcd.setCursor(0, 0);
+  lcd.print("Hold: Unit F<->C");
+  lcd.setCursor(0, 1);
+  lcd.print("DoubleTap:Slower");
+}
+
+
+void displayHelp() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("For more info:");
+  
+  // Example URL or message to scroll
+  const char* url2 = "Visit github.com/Fireflaker for Matilda documentation.";
+  
+  scrollText(url2, 1, 300); // Scroll on the second row with a delay of 300ms
+}
+
+void displayURL() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("ThingSpeak URL:");
+  
+  const char* url = "https://thingspeak.mathworks.com/channels/";
+  
+  scrollText(url, 1, 300); // Scroll on the second row with a delay of 300ms
+}
+
+void displayLoginUsr() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Login Email:");
+  
+  const char* LoginUsr = "jelac67984@kvegg.com";
+  
+  scrollText(LoginUsr, 1, 300); // Scroll on the second row with a delay of 300ms
+}
+
+void displayLoginPwd() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Login Password:");
+  
+  const char* LoginPwd = "Jelac67984";
+  
+  scrollText(LoginPwd, 1, 300); // Scroll on the second row with a delay of 300ms
+}
+
+
+
+void scrollText(const char* text, int row, int scroll_speed_ms) {
+  currentScrollText = text;
+  currentScrollRow = row;
+  scrollPosition = 0;
+  lastScrollTime = millis();
+}
+
+void updateScrollText(int scroll_speed_ms) {
+  if (currentScrollText == nullptr) return; // No text to scroll
+
+  unsigned long currentTime = millis();
+  if (currentTime - lastScrollTime >= scroll_speed_ms) {
+    int textLength = strlen(currentScrollText);
+    int screenWidth = 16; // Assuming a 16x2 LCD
+    int totalWidth = textLength + screenWidth;
+
+    lcd.setCursor(0, currentScrollRow);
+    for (int j = 0; j < screenWidth; j++) {
+      int charIndex = (scrollPosition + j) % totalWidth;
+      if (charIndex < textLength) {
+        lcd.print(currentScrollText[charIndex]);
+      } else {
+        lcd.print(" "); // Fill remaining space with blanks
+      }
+    }
+
+    scrollPosition = (scrollPosition + 1) % totalWidth;
+    lastScrollTime = currentTime;
+  }
+}
+    scrollPosition = (scrollPosition + 1) % totalWidth;
+    lastScrollTime = currentTime;
+  }
+}
+
+void exitHelpMode() {
+  inHelpMode = false;
+  lcd.clear();
+}
+
+
+////////////////////////////////////////////////end help/////////////////////////////////////
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+MAIN code
+
+
+byte thingSpeakSymbol[8] = { B00100, B01110, B11111, B00100, B00100, B00100, B00100, B11111 };
+byte batterySymbol[8] = { B01110, B11011, B10001, B10001, B10001, B10011, B10111, B1111 };
+
+byte noHeat[8] = {
+  B00000,
+  B00000,
+  B00000,
+  B00000,
+  B00000,
+  B00000,
+  B00000,
+  B10101
+};
+
+byte lowHeat[8] = {
+  B00000,
+  B00000,
+  B00000,
+  B00000,
+  B00100,
+  B00100,
+  B10100,
+  B11111
+};
+
+byte mediumHeat[8] = {
+  B00000,
+  B00000,
+  B01010,
+  B01010,
+  B01010,
+  B01010,
+  B01010,
+  B11111
+};
+
+byte highHeat[8] = {
+  B10001,
+  B01010,
+  B10101,
+  B01010,
+  B10101,
+  B01010,
+  B10101,
+  B11111
+};
+
+byte wifiIcon[8] = {
+  B00000,
+  B01110,
+  B10001,
+  B00100,
+  B01010,
+  B00000,
+  B00100,
+  B00000
+};
+
+byte thermocoupleIcon[8] = {
+  B00100,
+  B00100,
+  B00100,
+  B00100,
+  B00100,
+  B01110,
+  B01110,
+  B00100
+};
+
+
+byte tempIcon[8] = {
+  B00100,
+  B01010,
+  B01010,
+  B01110,
+  B01110,
+  B11111,
+  B11111,
+  B01110
+};
+
+byte humidityIcon[8] = {
+  B00100,
+  B00100,
+  B01010,
+  B01010,
+  B10001,
+  B10011,
+  B10111,
+  B01110
+};
+
+#include <SPI.h>
+#include <Adafruit_MAX31855.h>
+#include <LCD_I2C.h>
+#include <Wire.h>
+#include <CircularBuffer.hpp>
+#include <Adafruit_SHT4x.h>
+Adafruit_SHT4x sht4 = Adafruit_SHT4x();
+
+
+#include <OneButton.h>
+const int BOOT_BUTTON_PIN = 0;
+OneButton button(BOOT_BUTTON_PIN, true);  // true for active LOW
+
+float shtTemp, shtHumidity;
+int batteryPercentage;
+float voltages[8];
+
+unsigned long lastPingTime = 0;
+unsigned long pingInterval = 2000;  // Ping every 2 seconds
+
+const int SAMPLE_INTERVAL = 80;  // Sample every 100ms
+int DISPLAY_INTERVAL = 1000;     // Update LCD every 1000ms
+int BUFFER_SIZE = DISPLAY_INTERVAL / SAMPLE_INTERVAL;
+const int MAX_BUFFER_SIZE = 100;  // Choose a reasonable maximum size
+CircularBuffer<double, MAX_BUFFER_SIZE> thermocoupleBuffer;
+int currentBufferSize = DISPLAY_INTERVAL / SAMPLE_INTERVAL;
+
+const unsigned long DOUBLE_CLICK_INTERVAL = 300;  // 300ms between clicks
+unsigned long lastButtonReleaseTime = 0;
+int clickCount = 0;
+
+const unsigned long LONG_PRESS_TIME = 1000;  // 1 second hold to switch C/F
+unsigned long buttonPressStartTime = 0;
+bool buttonPressed = false;
+
+unsigned long lastSampleTime = 0;
+unsigned long lastDisplayTime = 0;
+
+double calculateAverageTemperature() {
+    double sum = 0;
+    for (int i = 0; i < thermocoupleBuffer.size(); i++) {
+        sum += thermocoupleBuffer[i];
+    }
+    return (thermocoupleBuffer.size() > 0) ? (sum / thermocoupleBuffer.size()) : 0.0;
+}
+
+double getAverageThermocoupleTemp() {
+  if (thermocoupleBuffer.isEmpty()) {
+    return 0;
+  }
+  double sum = 0;
+  int count;
+  if (thermocoupleBuffer.size() < BUFFER_SIZE) {
+    count = thermocoupleBuffer.size();
+  } else {
+    count = BUFFER_SIZE;
+  }
+  for (int i = 0; i < count; i++) {
+    sum += thermocoupleBuffer[i];
+  }
+  return sum / count;
+}
+
+
+// Pin definitions for MAX31855
+#define THERMO_SCK 21  // SPI Clock pin
+#define THERMO_CS 19   // Chip Select pin
+#define THERMO_SO 18   // Serial Out (MISO)
+
+// Pin definitions for I2C LCD
+#define I2C_SDA 23  // I2C Data pin
+#define I2C_SCL 22  // I2C Clock pin
+
+// Initialize MAX31855 object
+Adafruit_MAX31855 thermocouple(THERMO_SCK, THERMO_CS, THERMO_SO);
+
+// Initialize the LCD (address 0x3F, 16 columns, 2 rows)
+LCD_I2C lcd(0x3F, 16, 2);  // Change address to 0x27 if your LCD uses that address
+
+
+const unsigned long thingSpeakInterval = 15000;  // 15 seconds
+unsigned long previousThingSpeakTime = 0;
+unsigned long lcdUpdateInterval = 1000;  // Update LCD every 1 second
+unsigned long previousLcdUpdateTime = 0;
+
+bool displayFahrenheit = false;\
+bool inHelpMode = false;
+bool backlightOn = true;
+
+
+void setup() {
+  // Initialize serial communication
+  Serial.begin(115200);
+
+  // Initialize SPI bus
+  SPI.begin(THERMO_SCK, THERMO_SO);  // SCK = GPIO21, MISO = GPIO18
+
+  // Initialize I2C LCD
+  Wire.begin(I2C_SDA, I2C_SCL);
+  lcd.begin();
+  lcd.backlight();
+
+  // Print startup message on LCD
+  lcd.setCursor(0, 0);
+  lcd.print("Thermocouple");
+  lcd.setCursor(0, 1);
+  lcd.print("Initializing...");
+
+  setupSHT4x();
+  setupADS7830();
+
+  setupWiFi();
+  setupThingSpeak();
+
+  lcd.createChar(0, noHeat);
+  lcd.createChar(1, lowHeat);
+  lcd.createChar(2, highHeat);
+  lcd.createChar(3, thingSpeakSymbol);
+  lcd.createChar(4, batterySymbol);
+  lcd.createChar(5, wifiIcon);
+  lcd.createChar(6, tempIcon);
+  lcd.createChar(7, humidityIcon);
+  lcd.createChar(8, thermocoupleIcon);
+
+
+  setupADS7830();
+  scanI2C();
+
+  // Button setup
+  button.attachClick(handleShortPress);
+  button.attachLongPressStart(handleLongPressStart);
+  button.attachLongPressStop(handleLongPressStop);
+  button.attachDoubleClick(handleDoubleClick);
+
+  pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+
+
+  delay(100);  // Wait for initialization message to display
+}
+
+void scanI2C() {
+  byte error, address;
+  int nDevices = 0;
+
+  Serial.println("Scanning...");
+
+  for (address = 1; address < 127; address++) {
+    Wire.beginTransmission(address);
+    error = Wire.endTransmission();
+
+    if (error == 0) {
+      Serial.print("I2C device found at address 0x");
+      if (address < 16) Serial.print("0");
+      Serial.print(address, HEX);
+      Serial.println();
+      nDevices++;
+    } else if (error == 4) {
+      Serial.print("Unknown error at address 0x");
+      if (address < 16) Serial.print("0");
+      Serial.println(address, HEX);
+    }
+  }
+
+  if (nDevices == 0)
+    Serial.println("No I2C devices found\n");
+  else
+    Serial.println("Scan complete\n");
+}
+
+void setupSHT4x() {
+ if (!sht4.begin()) {
+ Serial.println("Couldn't find SHT4x");
+ while (1) delay(1); }
+Serial.println("SHT sensor found");
+}
+
+void loop() {
+  unsigned long currentTime = millis();
+
+  // Button handling
+  button.tick();
+
+  // Update scrolling text (non-blocking)
+  updateScrollText(300);
+
+  // Update ping every interval
+  if (currentTime - lastPingTime >= pingInterval) {
+    updatePing();
+    lastPingTime = currentTime;
+  }
+
+  // Sample thermocouple temperature
+  if (currentTime - lastSampleTime >= SAMPLE_INTERVAL) {
+    lastSampleTime = currentTime;
+    double thermocoupleTemp = thermocouple.readCelsius();
+    if (!isnan(thermocoupleTemp)) {
+      thermocoupleBuffer.push(thermocoupleTemp);
+    }
+  }
+
+  // Update LCD periodically
+  if (currentTime - lastDisplayTime >= DISPLAY_INTERVAL) {
+    double avgThermocoupleTemp = getAverageThermocoupleTemp();
+    float shtTemp, shtHumidity;
+    readSHT4x(shtTemp, shtHumidity);
+
+updateLCD(avgThermocoupleTemp, shtTemp, shtHumidity, batteryPercentage);
+    lastDisplayTime = currentTime;
+  }
+
+  // Send data to ThingSpeak periodically
+  if (currentTime - previousThingSpeakTime >= thingSpeakInterval) {
+    double avgThermocoupleTemp = getAverageThermocoupleTemp();
+    float shtTemp, shtHumidity;
+    readSHT4x(shtTemp, shtHumidity);
+
+    ThingSpeak.setField(1, avgThermocoupleTemp);
+    ThingSpeak.setField(2, shtTemp);
+    ThingSpeak.setField(3, shtHumidity);
+    ThingSpeak.writeFields(myChannelNumber, myWriteAPIKey);
+
+    previousThingSpeakTime = currentTime;
+  }
+}
+
+void handleShortPress() {
+  if (inHelpMode) {
+    cycleDisplayInfo();
+  } else {
+    // Toggle between Celsius and Fahrenheit
+    displayFahrenheit = !displayFahrenheit;
+updateLCD(avgThermocoupleTemp, shtTemp, shtHumidity, batteryPercentage);
+  }
+}
+
+void handleLongPressStart() {
+  inHelpMode = !inHelpMode;
+  if (inHelpMode) {
+    cycleDisplayInfo();
+  } else {
+    exitHelpMode();
+  }
+}
+
+void handleLongPressStop() {
+  // You can add additional functionality here if needed
+}
+
+void handleDoubleClick() {
+  toggleBacklight();
+}
+
+void updateLCD(double thermocoupleTemp, float shtTemp, float shtHumidity, int batteryPercentage) {
+  lcd.clear();
+
+  displayWiFiIcon();
+
+  // First row
+  lcd.setCursor(0, 0);
+  lcd.write((byte)8);  // Thermocouple icon
+  displayTemperature(thermocoupleTemp);
+  lcd.print(" ");
+  displayBatteryIcon(batteryPercentage);
+
+
+  // Second row
+  lcd.setCursor(0, 1);
+  lcd.write((byte)6);  // Temperature icon
+  displayTemperature(shtTemp);
+  lcd.print(" ");
+  lcd.write((byte)7);  // Humidity icon
+  lcd.print(shtHumidity, 2);
+  lcd.print("%");
+}
+
+
+
+void displayTemperature(float temperature) {
+  float displayTemp = displayFahrenheit ? (temperature * 9.0 / 5.0 + 32.0) : temperature;
+  lcd.print(displayTemp, 2);
+  lcd.print(displayFahrenheit ? "F" : "C");
+}
+
+void toggleTemperatureUnit() {
+  displayFahrenheit = !displayFahrenheit;
+  updateLCD(getAverageThermocoupleTemp(), shtTemp, shtHumidity, batteryPercentage);
+}
+
+void displayHeatLevel(int8_t heatLevel) {
+  lcd.setCursor(15, 1);
+  switch (heatLevel) {
+    case 1:
+      lcd.write((byte)0);  // No heat
+      break;
+    case 2:
+      lcd.write((byte)1);  // Low heat
+      break;
+    case 3:
+      lcd.write((byte)2);  // High heat
+      break;
+    default:
+      lcd.print(" ");  // Clear the character if no heating
+  }
+}
+
+void toggleBacklight() {
+  backlightOn = !backlightOn;
+  if (backlightOn) {
+    lcd.backlight();
+  } else {
+    lcd.noBacklight();
+  }
+  DISPLAY_INTERVAL = DISPLAY_INTERVAL * 1.5;
+  pingInterval = DISPLAY_INTERVAL;
+  lcdUpdateInterval = DISPLAY_INTERVAL;
+  BUFFER_SIZE = min(DISPLAY_INTERVAL / SAMPLE_INTERVAL, MAX_BUFFER_SIZE);
+}
